@@ -1,16 +1,32 @@
 import React from 'react';
 
-const Car = ({ position, lane }) => {
+const Car = ({ position, lane, useProportional = false }) => {
+  // Lane-based positioning (original 3-lane system)
   const lanePositions = {
     0: 'left-[15%]',
     1: 'left-[42.5%]',
     2: 'left-[70%]',
   };
 
+  // Proportional positioning based on normalized value (-1.0 to 1.0)
+  // Maps to 10% (left edge) to 90% (right edge) of screen
+  const getProportionalPosition = () => {
+    if (useProportional && position !== undefined) {
+      // Convert -1.0 to 1.0 range into 10% to 90% range
+      const percentage = ((position + 1.0) / 2.0) * 80 + 10;
+      return `${percentage.toFixed(1)}%`;
+    }
+    return null;
+  };
+
+  const proportionalStyle = useProportional ? {
+    left: getProportionalPosition(),
+  } : {};
+
   return (
     <div
-      className={`absolute bottom-24 ${lanePositions[lane]} transform -translate-x-1/2 transition-all duration-200 ease-out`}
-      style={{ zIndex: 10 }}
+      className={`absolute bottom-24 ${!useProportional ? lanePositions[lane] : ''} transform -translate-x-1/2 transition-all duration-200 ease-out`}
+      style={{ zIndex: 10, ...proportionalStyle }}
     >
       {/* Car body */}
       <div className="relative w-16 h-24 car-shadow">

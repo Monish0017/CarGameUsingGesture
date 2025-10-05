@@ -38,8 +38,14 @@ const char* mqtt_topic = "game/car/gesture";
 
 // ========== Gesture Detection Settings ==========
 const float X_THRESHOLD = 2.5;        // Tilt threshold for left/right detection
-const int GESTURE_DELAY = 250;        // Minimum delay between gestures (ms)
+const int GESTURE_DELAY = 100;        // Minimum delay between messages (ms)
 const float DEADZONE = 1.0;           // Deadzone to prevent accidental triggers
+
+// ========== Slap Game Settings ==========
+const float SLAP_THRESHOLD = 15.0;    // Acceleration threshold for slap detection (m/s²)
+const int SLAP_COOLDOWN = 500;        // Cooldown between slaps (ms)
+float maxSlapSpeed = 0.0;             // Track maximum slap speed
+unsigned long lastSlapTime = 0;
 
 // ========== Objects ==========
 Adafruit_MPU6050 mpu;
@@ -49,6 +55,7 @@ PubSubClient client(espClient);
 // ========== Variables ==========
 unsigned long lastGestureTime = 0;
 String lastGesture = "";
+float lastAx = 0, lastAy = 0, lastAz = 0;  // Previous acceleration values
 
 void setup() {
   Serial.begin(115200);
@@ -88,10 +95,10 @@ void loop() {
   }
   client.loop();
 
-  // Read sensor data and detect gestures
-  detectGesture();
+  // Read sensor data and detect gestures/slaps
+  detectGestureAndSlap();
   
-  delay(50);  // Small delay for stability
+  delay(20);  // Small delay for stability (50Hz update rate)
 }
 
 // ========== MPU6050 Initialization ==========
@@ -162,8 +169,8 @@ void connectMQTT() {
   }
 }
 
-// ========== Gesture Detection ==========
-void detectGesture() {
+// ========== Gesture and Slap Detection ==========
+void detectGestureAndSlap() {
   // Get sensor events
   sensors_event_t a, g, temp;
   mpu.getEvent(&a, &g, &temp);
@@ -171,51 +178,124 @@ void detectGesture() {
   // Get current time
   unsigned long currentTime = millis();
   
+  // Get acceleration values (m/s²)
+  float ax = a.acceleration.x;
+  float ay = a.acceleration.y;
+  float az = a.acceleration.z;
+  
+  // Calculate total acceleration magnitude
+  float accelMagnitude = sqrt(ax*ax + ay*ay + az*az);
+  
+  // Calculate speed (change in acceleration)
+  float speedX = abs(ax - lastAx);
+  float speedY = abs(ay - lastAy);
+  float speedZ = abs(az - lastAz);
+  float totalSpeed = sqrt(speedX*speedX + speedY*speedY + speedZ*speedZ);
+  
+  // Store current values for next iteration
+  lastAx = ax;
+  lastAy = ay;
+  lastAz = az;
+  
+  // ===== SLAP DETECTION =====
+  // Detect sudden acceleration spikes (slapping motion)
+  if (accelMagnitude > SLAP_THRESHOLD && (currentTime - lastSlapTime) > SLAP_COOLDOWN) {
+    float slapDistance = accelMagnitude - 9.8;  // Remove gravity component
+    float slapSpeed = totalSpeed;
+    
+    // Track maximum speed
+    if (slapSpeed > maxSlapSpeed) {
+      maxSlapSpeed = slapSpeed;
+    }
+    
+    // Publish slap data as JSON
+    publishSlapData(slapSpeed, slapDistance, accelMagnitude);
+    lastSlapTime = currentTime;
+    
+    Serial.print("👋 SLAP! Speed: ");
+    Serial.print(slapSpeed);
+    Serial.print(" | Distance: ");
+    Serial.print(slapDistance);
+    Serial.print(" | Magnitude: ");
+    Serial.println(accelMagnitude);
+  }
+  
+  // ===== RACING GAME GESTURE DETECTION =====
   // Check if enough time has passed since last gesture
   if (currentTime - lastGestureTime < GESTURE_DELAY) {
     return;
   }
   
-  // Get X-axis acceleration (tilt left/right)
-  float ax = a.acceleration.x;
+  // Normalize ax for proportional control (-1.0 to 1.0)
+  float normalizedX = constrain(ax / 10.0, -1.0, 1.0);
+  float normalizedY = constrain(ay / 10.0, -1.0, 1.0);
   
   String gesture = "";
   
-  // Detect tilt gestures
+  // Detect tilt gestures for lane-based control
   if (ax < -X_THRESHOLD) {
     gesture = "left";
   } else if (ax > X_THRESHOLD) {
     gesture = "right";
-  } else if (abs(ax) < DEADZONE) {
-    // In deadzone - no gesture
-    lastGesture = "";
-    return;
+  } else if (abs(ax) < DEADZONE && abs(ay) < DEADZONE) {
+    // In deadzone - no gesture, but still send data for proportional control
+    gesture = "center";
   }
   
-  // Only publish if gesture changed and is not empty
-  if (gesture != "" && gesture != lastGesture) {
-    publishGesture(gesture);
+  // Always publish data (even subtle movements for proportional control)
+  if (gesture != "" || abs(normalizedX) > 0.1 || abs(normalizedY) > 0.1) {
+    publishRacingData(gesture, ax, ay, normalizedX, normalizedY, totalSpeed);
     lastGesture = gesture;
     lastGestureTime = currentTime;
-    
-    // Visual feedback in Serial Monitor
-    Serial.print("🎮 Gesture: ");
-    Serial.print(gesture.c_str());
-    Serial.print(" | X: ");
-    Serial.println(ax);
   }
 }
 
-// ========== Publish Gesture to MQTT ==========
-void publishGesture(String gesture) {
-  if (client.connected()) {
-    bool success = client.publish(mqtt_topic, gesture.c_str());
-    
-    if (!success) {
-      Serial.println("⚠️  Failed to publish gesture");
-    }
-  } else {
-    Serial.println("⚠️  MQTT not connected, reconnecting...");
-    connectMQTT();
+// ========== Publish Racing Game Data (JSON) ==========
+void publishRacingData(String gesture, float ax, float ay, float normX, float normY, float speed) {
+  if (!client.connected()) {
+    return;
+  }
+  
+  // Create JSON message with all sensor data
+  String json = "{";
+  json += "\"type\":\"racing\",";
+  json += "\"gesture\":\"" + gesture + "\",";
+  json += "\"ax\":" + String(ax, 2) + ",";
+  json += "\"ay\":" + String(ay, 2) + ",";
+  json += "\"normX\":" + String(normX, 3) + ",";
+  json += "\"normY\":" + String(normY, 3) + ",";
+  json += "\"speed\":" + String(speed, 2);
+  json += "}";
+  
+  bool success = client.publish(mqtt_topic, json.c_str());
+  
+  if (!success) {
+    Serial.println("⚠️  Failed to publish racing data");
+  }
+}
+
+// ========== Publish Slap Game Data (JSON) ==========
+void publishSlapData(float speed, float distance, float magnitude) {
+  if (!client.connected()) {
+    return;
+  }
+  
+  // Calculate points based on speed and distance
+  int points = (int)((speed * 10) + (distance * 5));
+  
+  // Create JSON message
+  String json = "{";
+  json += "\"type\":\"slap\",";
+  json += "\"speed\":" + String(speed, 2) + ",";
+  json += "\"distance\":" + String(distance, 2) + ",";
+  json += "\"magnitude\":" + String(magnitude, 2) + ",";
+  json += "\"points\":" + String(points) + ",";
+  json += "\"maxSpeed\":" + String(maxSlapSpeed, 2);
+  json += "}";
+  
+  bool success = client.publish(mqtt_topic, json.c_str());
+  
+  if (!success) {
+    Serial.println("⚠️  Failed to publish slap data");
   }
 }

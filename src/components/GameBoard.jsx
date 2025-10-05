@@ -2,8 +2,9 @@ import React, { useState, useEffect, useRef } from 'react';
 import Car from './Car';
 import Obstacle from './Obstacle';
 
-const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand }) => {
-  const [carLane, setCarLane] = useState(1); // 0, 1, 2 (left, center, right)
+const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand, controlMode = 'lane' }) => {
+  const [carLane, setCarLane] = useState(1); // 0, 1, 2 (left, center, right) - for lane mode
+  const [carPosition, setCarPosition] = useState(0.0); // -1.0 to 1.0 - for proportional mode
   const [obstacles, setObstacles] = useState([]);
   const [score, setScore] = useState(0);
   const [gameRunning, setGameRunning] = useState(true);
@@ -14,28 +15,47 @@ const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand }) => {
   useEffect(() => {
     if (!gestureCommand || !gameRunning) return;
 
-    if (gestureCommand === 'left' && carLane > 0) {
-      setCarLane(prev => prev - 1);
-    } else if (gestureCommand === 'right' && carLane < 2) {
-      setCarLane(prev => prev + 1);
+    if (controlMode === 'proportional') {
+      // Proportional control based on normalized accelerometer value
+      if (gestureCommand.normX !== undefined) {
+        setCarPosition(gestureCommand.normX); // Direct mapping
+      }
+    } else {
+      // Lane-based control (original behavior)
+      const gesture = gestureCommand.gesture || gestureCommand;
+      if (gesture === 'left' && carLane > 0) {
+        setCarLane(prev => prev - 1);
+      } else if (gesture === 'right' && carLane < 2) {
+        setCarLane(prev => prev + 1);
+      }
     }
-  }, [gestureCommand, carLane, gameRunning]);
+  }, [gestureCommand, carLane, carPosition, gameRunning, controlMode]);
 
   // Keyboard controls for testing
   useEffect(() => {
     const handleKeyPress = (e) => {
       if (!gameRunning) return;
       
-      if (e.key === 'ArrowLeft' && carLane > 0) {
-        setCarLane(prev => prev - 1);
-      } else if (e.key === 'ArrowRight' && carLane < 2) {
-        setCarLane(prev => prev + 1);
+      if (controlMode === 'proportional') {
+        // Arrow keys move by increments in proportional mode
+        if (e.key === 'ArrowLeft') {
+          setCarPosition(prev => Math.max(-1.0, prev - 0.1));
+        } else if (e.key === 'ArrowRight') {
+          setCarPosition(prev => Math.min(1.0, prev + 0.1));
+        }
+      } else {
+        // Lane-based movement
+        if (e.key === 'ArrowLeft' && carLane > 0) {
+          setCarLane(prev => prev - 1);
+        } else if (e.key === 'ArrowRight' && carLane < 2) {
+          setCarLane(prev => prev + 1);
+        }
       }
     };
 
     window.addEventListener('keydown', handleKeyPress);
     return () => window.removeEventListener('keydown', handleKeyPress);
-  }, [carLane, gameRunning]);
+  }, [carLane, carPosition, gameRunning, controlMode]);
 
   // Game loop
   useEffect(() => {
@@ -69,7 +89,19 @@ const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand }) => {
 
         // Check collision
         const collision = updated.some(obs => {
-          return obs.lane === carLane && obs.position >= 70 && obs.position <= 95;
+          if (controlMode === 'proportional') {
+            // Proportional mode: check if car position overlaps with obstacle
+            // Convert lane to position range
+            const laneCenterPositions = [-0.6, 0.0, 0.6]; // Approximate lane centers
+            const obstaclePosX = laneCenterPositions[obs.lane];
+            const carPosX = carPosition;
+            
+            // Collision if within ~0.3 units and obstacle at car's Y position
+            return Math.abs(carPosX - obstaclePosX) < 0.3 && obs.position >= 70 && obs.position <= 95;
+          } else {
+            // Lane mode: exact lane match
+            return obs.lane === carLane && obs.position >= 70 && obs.position <= 95;
+          }
         });
 
         if (collision) {
@@ -99,7 +131,7 @@ const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand }) => {
       clearInterval(obstacleInterval);
       clearInterval(gameLoopRef.current);
     };
-  }, [gameRunning, carLane, onGameOver, onScoreUpdate]);
+  }, [gameRunning, carLane, carPosition, onGameOver, onScoreUpdate, controlMode]);
 
   return (
     <div className="relative w-full h-full overflow-hidden bg-gradient-to-b from-gray-800 to-gray-900">
@@ -127,7 +159,11 @@ const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand }) => {
           <div className="absolute right-0 top-0 bottom-0 w-12 bg-gradient-to-l from-green-900 to-transparent opacity-60"></div>
 
           {/* Car */}
-          <Car lane={carLane} />
+          <Car 
+            lane={carLane} 
+            position={carPosition}
+            useProportional={controlMode === 'proportional'}
+          />
 
           {/* Obstacles */}
           {obstacles.map(obstacle => (

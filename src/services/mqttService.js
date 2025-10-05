@@ -48,9 +48,24 @@ class MQTTService {
       });
 
       this.client.on('message', (topic, message) => {
-        const gesture = message.toString();
-        console.log('Received gesture:', gesture);
-        this.notifyListeners(gesture);
+        try {
+          const messageStr = message.toString();
+          console.log('Received message:', messageStr);
+          
+          // Try to parse as JSON for enhanced data (ax, ay, speed, distance)
+          let parsedData;
+          try {
+            parsedData = JSON.parse(messageStr);
+            console.log('Parsed JSON data:', parsedData);
+          } catch (e) {
+            // Fallback to simple string gesture for backward compatibility
+            parsedData = { gesture: messageStr };
+          }
+          
+          this.notifyListeners(parsedData);
+        } catch (error) {
+          console.error('Error processing message:', error);
+        }
       });
 
       this.client.on('error', (err) => {

@@ -35,4 +35,4 @@ lerna-debug.log*
 *.sw?
 
 # Environment variables (optional - remove .env from gitignore if you want to commit it)
-# .env
+.env
