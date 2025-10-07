@@ -18,9 +18,10 @@ connectDB();
 
 // Middleware
 app.use(cors({
-  origin: 'https://car-game-using-gesture.vercel.app',
+  origin: 'https://car-game-using-gesture.vercel.app', // Adjust as needed for your frontend
   credentials: true
 }));
+
 app.use(express.json());
 app.use(express.urlencoded({ extended: true }));
 

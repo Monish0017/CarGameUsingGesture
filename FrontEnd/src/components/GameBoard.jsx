@@ -10,6 +10,10 @@ const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand, difficultyLevel 
   const [difficulty, setDifficulty] = useState(1); // Progressive difficulty level based on score
   const gameLoopRef = useRef(null);
   const obstacleIdRef = useRef(0);
+  const difficultyRef = useRef(1); // Use ref to avoid re-triggering intervals
+  const carPositionRef = useRef(0.0); // Ref for collision detection without re-renders
+  const obstacleSpawnIntervalRef = useRef(null); // Ref to track spawn interval
+  const gameRunningRef = useRef(true); // Track game state without re-renders
 
   // Difficulty configurations based on selected level
   const difficultyConfig = {
@@ -32,18 +36,15 @@ const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand, difficultyLevel 
 
   const config = difficultyConfig[difficultyLevel] || difficultyConfig.intermediate;
 
-  // Handle gesture commands from MQTT
+  // Handle gesture commands from MQTT - NO RE-RENDERS
   useEffect(() => {
-    if (!gestureCommand || !gameRunning) return;
+    if (!gestureCommand || gestureCommand.normX === undefined) return;
 
-    // Analog/Proportional control based on normalized accelerometer value
-    if (gestureCommand.normX !== undefined) {
-      // Full range movement: -1.0 (left edge) to +1.0 (right edge)
-      // Clamp to ensure it stays within bounds
-      const clampedPosition = Math.max(-1.0, Math.min(1.0, gestureCommand.normX));
-      setCarPosition(clampedPosition);
-    }
-  }, [gestureCommand, gameRunning]);
+    // Update car position directly via state AND ref
+    const clampedPosition = Math.max(-1.0, Math.min(1.0, gestureCommand.normX));
+    setCarPosition(clampedPosition);
+    carPositionRef.current = clampedPosition; // Update ref for collision detection
+  }, [gestureCommand]);
 
   // Keyboard controls for testing (analog only)
   useEffect(() => {
@@ -52,9 +53,13 @@ const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand, difficultyLevel 
       
       // Arrow keys move by increments - full range allowed
       if (e.key === 'ArrowLeft') {
-        setCarPosition(prev => Math.max(-1.0, prev - 0.08)); // Move left, stop at -1.0
+        const newPos = Math.max(-1.0, carPositionRef.current - 0.08);
+        setCarPosition(newPos);
+        carPositionRef.current = newPos;
       } else if (e.key === 'ArrowRight') {
-        setCarPosition(prev => Math.min(1.0, prev + 0.08)); // Move right, stop at +1.0
+        const newPos = Math.min(1.0, carPositionRef.current + 0.08);
+        setCarPosition(newPos);
+        carPositionRef.current = newPos;
       }
     };
 
@@ -65,13 +70,15 @@ const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand, difficultyLevel 
   // Update difficulty based on score
   useEffect(() => {
     const newDifficulty = Math.floor(score / 50) + 1; // Increase every 50 points
-    setDifficulty(Math.min(newDifficulty, 5)); // Cap at level 5
+    const cappedDifficulty = Math.min(newDifficulty, 5); // Cap at level 5
+    setDifficulty(cappedDifficulty);
+    difficultyRef.current = cappedDifficulty; // Update ref without triggering re-render
   }, [score]);
 
-  // Game loop
+  // GAME LOOP - Runs ONCE and NEVER resets (isolated from MQTT updates)
   useEffect(() => {
-    if (!gameRunning) return;
-
+    console.log(`🎮 GAME LOOP STARTING...`);
+    
     const obstacleTypes = ['cone', 'barrel', 'rock'];
 
     // Get spawn interval based on difficulty level
@@ -89,13 +96,18 @@ const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand, difficultyLevel 
       baseSpeed = 3.5;
     }
     
-    const obstacleSpeed = baseSpeed + (difficulty - 1) * 0.3; // Progressive speed increase
+    // Use ref to track current difficulty for speed calculation
+    const getCurrentSpeed = () => baseSpeed + (difficultyRef.current - 1) * 0.3;
 
-    console.log(`🎮 Game started! Difficulty: ${difficultyLevel}, Spawn every: ${spawnInterval}ms, Speed: ${obstacleSpeed}`);
+    console.log(`🎮 Difficulty: ${difficultyLevel}, Spawn interval: ${spawnInterval}ms, Base Speed: ${baseSpeed}`);
+    console.log(`🚀 This interval will NOT be affected by MQTT updates!`);
 
-    // Generate obstacles at fixed intervals
-    const obstacleInterval = setInterval(() => {
-      console.log('🚧 Spawning obstacle...');
+    // Generate obstacles at fixed intervals - STORED IN REF
+    obstacleSpawnIntervalRef.current = setInterval(() => {
+      if (!gameRunningRef.current) return; // Check ref, not state
+      
+      const timestamp = new Date().toLocaleTimeString();
+      console.log(`🚧 SPAWNING OBSTACLE at ${timestamp}`);
       
       // Spawn obstacle in a random lane
       const randomLane = Math.floor(Math.random() * 3);
@@ -114,19 +126,23 @@ const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand, difficultyLevel 
 
     // Move obstacles and check collisions
     gameLoopRef.current = setInterval(() => {
+      if (!gameRunningRef.current) return; // Check ref, not state
+      
+      const obstacleSpeed = getCurrentSpeed();
+      
       setObstacles(prev => {
         const updated = prev.map(obs => ({
           ...obs,
           position: obs.position + obstacleSpeed,
         }));
 
-        // Check collision
+        // Check collision using REF (doesn't depend on state)
         const collision = updated.some(obs => {
           // Analog mode: check if car position overlaps with obstacle
           // Convert lane to position range for obstacles
           const laneCenterPositions = [-0.65, 0.0, 0.65]; // Lane centers
           const obstaclePosX = laneCenterPositions[obs.lane];
-          const carPosX = carPosition;
+          const carPosX = carPositionRef.current; // USE REF instead of state!
           
           // Collision if within collision radius and obstacle at car's Y position
           const collisionRadius = 0.25; // Tighter collision detection
@@ -134,6 +150,7 @@ const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand, difficultyLevel 
         });
 
         if (collision) {
+          gameRunningRef.current = false;
           setGameRunning(false);
           onGameOver();
           return prev;
@@ -156,11 +173,17 @@ const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand, difficultyLevel 
       });
     }, 50);
 
+    // Cleanup function
     return () => {
-      clearInterval(obstacleInterval);
-      clearInterval(gameLoopRef.current);
+      console.log('🛑 Cleaning up game intervals...');
+      if (obstacleSpawnIntervalRef.current) {
+        clearInterval(obstacleSpawnIntervalRef.current);
+      }
+      if (gameLoopRef.current) {
+        clearInterval(gameLoopRef.current);
+      }
     };
-  }, [gameRunning, onGameOver, onScoreUpdate, difficulty, difficultyLevel]);
+  }, []); // EMPTY DEPS - Run ONCE when component mounts!
 
   return (
     <div className="relative w-full h-full bg-gradient-to-b from-gray-800 to-gray-900">
@@ -188,6 +211,7 @@ const GameBoard = ({ onGameOver, onScoreUpdate, gestureCommand, difficultyLevel 
           ))}
         </div>
         <div className="text-xs text-purple-400 mt-1">Level {difficulty}/5</div>
+        <div className="text-xs text-green-400 mt-2">🚧 Active: {obstacles.length}</div>
       </div>
 
       {/* Road */}
